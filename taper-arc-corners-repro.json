@@ -1,0 +1,106 @@
+{
+ "commands": [
+  {
+   "command": "solid.box",
+   "params": {
+    "length": 150,
+    "width": 120,
+    "height": 8,
+    "center": [
+     0,
+     0,
+     -4
+    ]
+   }
+  },
+  {
+   "command": "sketch.create",
+   "params": {
+    "plane": "XY",
+    "name": "Pocket"
+   }
+  },
+  {
+   "command": "sketch.arc.center_point",
+   "params": {
+    "center": [
+     0,
+     0
+    ],
+    "start": [
+     46.81951219512195,
+     15.118640078089934
+    ],
+    "end": [
+     -46.81951219512195,
+     15.118640078089934
+    ]
+   }
+  },
+  {
+   "command": "sketch.arc.center_point",
+   "params": {
+    "center": [
+     -41.0,
+     0
+    ],
+    "start": [
+     -46.81951219512195,
+     15.118640078089934
+    ],
+    "end": [
+     -46.81951219512195,
+     -15.118640078089934
+    ]
+   }
+  },
+  {
+   "command": "sketch.arc.center_point",
+   "params": {
+    "center": [
+     0,
+     0
+    ],
+    "start": [
+     -46.81951219512195,
+     -15.118640078089934
+    ],
+    "end": [
+     46.81951219512195,
+     -15.118640078089934
+    ]
+   }
+  },
+  {
+   "command": "sketch.arc.center_point",
+   "params": {
+    "center": [
+     41.0,
+     0
+    ],
+    "start": [
+     46.81951219512195,
+     -15.118640078089934
+    ],
+    "end": [
+     46.81951219512195,
+     15.118640078089934
+    ]
+   }
+  },
+  {
+   "command": "sketch.finish",
+   "params": {}
+  },
+  {
+   "command": "solid.extrude",
+   "params": {
+    "sketch": "Pocket",
+    "distance": 2.5,
+    "direction": "negative",
+    "taper": "-45 deg",
+    "operation": "cut"
+   }
+  }
+ ]
+}
