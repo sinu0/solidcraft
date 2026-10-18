@@ -1272,6 +1272,65 @@ fn blend_in_order(body: &Body, edges: &[Vec3], r: f64, shape: Shape, what: &str,
     blend_each(cur, edges, r, shape, what, &counts, curved_ends)
 }
 
+/// The edges of a solid in [`Body::unique_edges`] order, asked for the edge nearest each of many
+/// points: a blend step looks up every edge still to do, and remaking the edge list and every
+/// edge's polyline per lookup made a run of blends cubic in the edge count. Lines are measured
+/// exactly; a curve is divided only when a lookup needs it (once), since a point on a line (an
+/// edge's middle, as picks are) has no curve nearer: edges meet only at their ends.
+struct EdgeIndex {
+    all: Vec<mt::Edge>,
+    /// A line's ends, `None` for a curve.
+    lines: Vec<Option<(Vec3, Vec3)>>,
+    curves: Vec<std::cell::OnceCell<Option<Vec<Vec3>>>>,
+    tol: f64,
+    /// A distance this small to a line is the point lying on it.
+    on: f64,
+}
+
+impl EdgeIndex {
+    fn new(solid: &Solid, tol: f64, size: f64) -> Self {
+        let all = Body::unique_edges(solid);
+        let lines =
+            all.iter().map(|e| matches!(e.curve(), mt::Curve::Line(_)).then(|| (from_p3(e.front().point()), from_p3(e.back().point())))).collect();
+        let curves = all.iter().map(|_| std::cell::OnceCell::new()).collect();
+        EdgeIndex { all, lines, curves, tol, on: (size * 1e-9).max(1e-12) }
+    }
+
+    /// The index of the edge nearest `p` (by polyline distance) and the distance, as
+    /// [`Body::nearest_edge`] gives it.
+    fn nearest(&self, p: Vec3) -> Result<Option<(usize, f64)>> {
+        let mut best: Option<(usize, f64)> = None;
+        for (i, l) in self.lines.iter().enumerate() {
+            if let Some((a, b)) = l {
+                let d = p.dist_to_segment(*a, *b);
+                if best.is_none_or(|(_, bd)| d < bd) {
+                    best = Some((i, d));
+                }
+            }
+        }
+        if best.is_some_and(|(_, d)| d <= self.on) {
+            return Ok(best);
+        }
+        for (i, l) in self.lines.iter().enumerate() {
+            if l.is_some() {
+                continue;
+            }
+            let (Some(cell), Some(e)) = (self.curves.get(i), self.all.get(i)) else { continue };
+            let pts = cell.get_or_init(|| Body::polylines_of(std::slice::from_ref(e), self.tol).ok().and_then(|mut v| v.pop()));
+            let Some(pts) = pts else { return Err(KernelError::Failed("edge polyline".into())) };
+            for w in pts.windows(2) {
+                if let (Some(a), Some(b)) = (w.first(), w.get(1)) {
+                    let d = p.dist_to_segment(*a, *b);
+                    if best.is_none_or(|(bi, bd)| d < bd || (d == bd && i < bi)) {
+                        best = Some((i, d));
+                    }
+                }
+            }
+        }
+        Ok(best)
+    }
+}
+
 /// The edges blended one at a time (see [`blend`]), `cur` being the healed body.
 fn blend_each(mut cur: Body, edges: &[Vec3], r: f64, shape: Shape, what: &str, counts: &[(usize, usize)], curved_ends: bool) -> Result<Body> {
     let counts = counts.to_vec();
@@ -1289,11 +1348,12 @@ fn blend_each(mut cur: Body, edges: &[Vec3], r: f64, shape: Shape, what: &str, c
     // by the order the edges come in).
     let along: Vec<mt::Edge> = {
         let solid = cur.deep_copy();
-        let all = Body::unique_edges(&solid);
         let tol = (cur.size() * 2e-3).max(1e-3);
+        let index = EdgeIndex::new(&solid, tol, cur.size());
+        let all = &index.all;
         let mut list: Vec<mt::Edge> = Vec::new();
         for p in edges {
-            if let Some((idx, _)) = cur.nearest_edge(*p, tol)?
+            if let Some((idx, _)) = index.nearest(*p)?
                 && let Some(e) = all.get(idx)
             {
                 let ids = smooth_chain(&solid, e).unwrap_or_else(|| vec![e.id()]);
@@ -1310,15 +1370,18 @@ fn blend_each(mut cur: Body, edges: &[Vec3], r: f64, shape: Shape, what: &str, c
     let on_chains = |e: &mt::Edge| lies_on(e, &along, near_chain);
     for _ in 0..(2 * edges.len() + 4) {
         if todo.is_empty() {
-            return Ok(cur);
+            // The steps were kept unmeshed (`record::rebuilt_local`): oriented once, here.
+            return cur.oriented_outward();
         }
         let size = cur.size();
         let tol = (size * 2e-3).max(1e-3);
         let solid = cur.deep_copy();
+        // The body changes only once a blend is made: one index for all the lookups until then.
+        let index = EdgeIndex::new(&solid, tol, size);
         if todo.len() >= 2
-            && let Some((ids, covered)) = run_on_loop(&cur, &solid, &todo)?
+            && let Some((ids, covered)) = run_on_loop(&cur, &solid, &index, &todo)?
             && let Some(Ok((res, rec))) = crate::loopblend::loop_blend(&solid, &ids, size, r, shape == Shape::Round)
-            && let Ok(b) = guard(what, || Ok(res)).and_then(|res| record::rebuilt(res, &[&solid], &rec))
+            && let Ok(b) = guard(what, || Ok(res)).and_then(|res| record::rebuilt_local(res, &[&solid], &rec))
         {
             let near = edges_box(&solid, &ids, r + tol);
             refused.retain(|(_, b, _)| !boxes_meet(*b, near));
@@ -1335,11 +1398,11 @@ fn blend_each(mut cur: Body, edges: &[Vec3], r: f64, shape: Shape, what: &str, c
                 }
                 continue;
             }
-            let Some((idx, dist)) = cur.nearest_edge(*p, tol)? else { return Err(KernelError::Invalid("the body has no edges".into())) };
+            let Some((idx, dist)) = index.nearest(*p)? else { return Err(KernelError::Invalid("the body has no edges".into())) };
             if dist > size * 0.05 + 1e-3 {
                 return Err(KernelError::Invalid(format!("no edge near {:?}", [p.x, p.y, p.z])));
             }
-            let edge = Body::unique_edges(&solid).into_iter().nth(idx).ok_or_else(|| KernelError::Invalid("edge index".into()))?;
+            let edge = index.all.get(idx).cloned().ok_or_else(|| KernelError::Invalid("edge index".into()))?;
             // Faces that meet smoothly (a round's seam with the face it runs into) leave no
             // corner to blend: say so rather than that blending it isn't supported.
             if tangent_faces(&solid, &edge) {
@@ -1356,13 +1419,7 @@ fn blend_each(mut cur: Body, edges: &[Vec3], r: f64, shape: Shape, what: &str, c
                 let on_chain: Vec<usize> = todo
                     .iter()
                     .enumerate()
-                    .filter(|(_, q)| {
-                        cur.nearest_edge(**q, tol)
-                            .ok()
-                            .flatten()
-                            .and_then(|(i, _)| Body::unique_edges(&solid).into_iter().nth(i))
-                            .is_some_and(|x| ids.contains(&x.id()))
-                    })
+                    .filter(|(_, q)| index.nearest(**q).ok().flatten().and_then(|(i, _)| index.all.get(i)).is_some_and(|x| ids.contains(&x.id())))
                     .map(|(i, _)| i)
                     .collect();
                 #[cfg(test)]
@@ -1376,7 +1433,7 @@ fn blend_each(mut cur: Body, edges: &[Vec3], r: f64, shape: Shape, what: &str, c
             // radius: it ends in that round (as if both were rounded together).
             let chain = smooth_chain_within(&solid, &edge, &on_chains);
             let into_round = |ids: &[mt::EdgeID]| {
-                Body::unique_edges(&solid).iter().any(|x| {
+                index.all.iter().any(|x| {
                     ids.contains(&x.id())
                         && x.id() != edge.id()
                         && [edge.front(), edge.back()].iter().any(|v| x.front() == *v || x.back() == *v)
@@ -1387,7 +1444,7 @@ fn blend_each(mut cur: Body, edges: &[Vec3], r: f64, shape: Shape, what: &str, c
             let runs_on = !curved_case(&solid, &edge, false)
                 && chain.as_ref().is_some_and(|ids| {
                     ids.len() > 1
-                        && Body::unique_edges(&solid).iter().any(|x| ids.contains(&x.id()) && !matches!(x.curve(), mt::Curve::Line(_)))
+                        && index.all.iter().any(|x| ids.contains(&x.id()) && !matches!(x.curve(), mt::Curve::Line(_)))
                         && !(shape == Shape::Round && into_round(ids))
                 });
             let local = || guard(what, || blend_one(&solid, &edge, size, r, shape));
@@ -1426,7 +1483,7 @@ fn blend_each(mut cur: Body, edges: &[Vec3], r: f64, shape: Shape, what: &str, c
             };
             // What this attempt could change: the edge and its smooth chain, with room for the blend.
             let reach = edges_box(&solid, chain.as_deref().unwrap_or(&[edge.id()]), r + tol);
-            match attempt.and_then(|((o, rec), js)| record::rebuilt(o, &[&solid], &rec).map(|b| (b, js))) {
+            match attempt.and_then(|((o, rec), js)| record::rebuilt_local(o, &[&solid], &rec).map(|b| (b, js))) {
                 Ok((b, js)) => {
                     done = Some((b, js, reach));
                     break;
@@ -1455,7 +1512,7 @@ fn blend_each(mut cur: Body, edges: &[Vec3], r: f64, shape: Shape, what: &str, c
             None => return Err(first_err.unwrap_or_else(|| unsupported("these edges"))),
         }
     }
-    if todo.is_empty() { Ok(cur) } else { Err(unsupported("blending these edges together")) }
+    if todo.is_empty() { cur.oriented_outward() } else { Err(unsupported("blending these edges together")) }
 }
 
 #[cfg(test)]
@@ -1492,20 +1549,23 @@ fn boxes_meet(a: (Vec3, Vec3), b: (Vec3, Vec3)) -> bool {
 /// two of the points' edges, joined by arcs that meet them smoothly (left by earlier blends):
 /// the run's edge ids and the points it covers.
 #[allow(clippy::type_complexity)]
-fn run_on_loop(cur: &Body, solid: &Solid, pts: &[Vec3]) -> Result<Option<(Vec<mt::EdgeID>, Vec<Vec3>)>> {
+fn run_on_loop(cur: &Body, solid: &Solid, index: &EdgeIndex, pts: &[Vec3]) -> Result<Option<(Vec<mt::EdgeID>, Vec<Vec3>)>> {
     use mt::{BoundedCurve, ParametricCurve};
     let size = cur.size();
-    let tol = (size * 2e-3).max(1e-3);
-    let all = Body::unique_edges(solid);
+    let all = &index.all;
     let mut per: Vec<(Vec3, mt::EdgeID)> = Vec::new();
     for p in pts {
-        if let Some((idx, dist)) = cur.nearest_edge(*p, tol)?
+        if let Some((idx, dist)) = index.nearest(*p)?
             && dist <= size * 0.05 + 1e-3
             && let Some(e) = all.get(idx)
         {
             per.push((*p, e.id()));
         }
     }
+    // Looked up by id for every edge of every planar loop: sets, not scans of `per` and `all`
+    // (a plate with many ribs has loops of hundreds of edges, and this runs after every blend).
+    let picked: std::collections::HashSet<mt::EdgeID> = per.iter().map(|(_, id)| *id).collect();
+    let by_id: HashMap<mt::EdgeID, &mt::Edge> = all.iter().map(|e| (e.id(), e)).collect();
     let dir = |e: &mt::Edge, at_end: bool| -> Option<Vec3> {
         let c = e.oriented_curve();
         let (t0, t1) = c.range_tuple();
@@ -1520,17 +1580,25 @@ fn run_on_loop(cur: &Body, solid: &Solid, pts: &[Vec3]) -> Result<Option<(Vec<mt
         for w in f.boundaries() {
             let es: Vec<mt::Edge> = w.edge_iter().cloned().collect();
             let m = es.len();
-            let sel = |i: usize| es.get(i % m).is_some_and(|e| per.iter().any(|(_, id)| *id == e.id()));
+            if m == 0 {
+                continue;
+            }
+            let sel_at: Vec<bool> = es.iter().map(|e| picked.contains(&e.id())).collect();
             // A filler: an unselected arc meeting both neighbours smoothly.
             let smooth = |a: &mt::Edge, b: &mt::Edge| match (dir(a, true), dir(b, false)) {
                 (Some(x), Some(y)) => x.dot(y) > 1.0 - 1e-6,
                 _ => false,
             };
-            let filler = |i: usize| {
-                let (Some(prev), Some(e), Some(next)) = (es.get((i + m - 1) % m), es.get(i % m), es.get((i + 1) % m)) else { return false };
-                !matches!(e.curve(), mt::Curve::Line(_)) && smooth(prev, e) && smooth(e, next)
-            };
-            let usable = |i: usize| sel(i) || filler(i);
+            let usable_at: Vec<bool> = (0..m)
+                .map(|i| {
+                    sel_at.get(i).copied().unwrap_or(false) || {
+                        let (Some(prev), Some(e), Some(next)) = (es.get((i + m - 1) % m), es.get(i), es.get((i + 1) % m)) else { return false };
+                        !matches!(e.curve(), mt::Curve::Line(_)) && smooth(prev, e) && smooth(e, next)
+                    }
+                })
+                .collect();
+            let sel = |i: usize| sel_at.get(i % m).copied().unwrap_or(false);
+            let usable = |i: usize| usable_at.get(i % m).copied().unwrap_or(false);
             if (0..m).all(usable) {
                 // The whole loop.
                 if (0..m).filter(|i| sel(*i)).count() >= 2 {
@@ -1545,28 +1613,26 @@ fn run_on_loop(cur: &Body, solid: &Solid, pts: &[Vec3]) -> Result<Option<(Vec<mt
             // Runs: start after an unusable edge; trim fillers off both ends.
             for s0 in 0..m {
                 if usable(s0) && !usable(s0 + m - 1) {
-                    let mut idx: Vec<usize> = (0..m).map(|j| s0 + j).take_while(|i| usable(*i)).collect();
-                    while idx.first().is_some_and(|i| !sel(*i)) {
-                        idx.remove(0);
-                    }
-                    while idx.last().is_some_and(|i| !sel(*i)) {
-                        idx.pop();
-                    }
+                    let run: Vec<usize> = (0..m).map(|j| s0 + j).take_while(|i| usable(*i)).collect();
+                    let (Some(a), Some(b)) = (run.iter().position(|i| sel(*i)), run.iter().rposition(|i| sel(*i))) else { continue };
+                    let idx = run.get(a..=b).unwrap_or_default();
                     if idx.iter().filter(|i| sel(**i)).count() < 2 {
                         continue;
                     }
                     let ids: Vec<mt::EdgeID> = idx.iter().filter_map(|i| es.get(i % m).map(|e| e.id())).collect();
+                    let in_run: std::collections::HashSet<mt::EdgeID> = ids.iter().copied().collect();
                     // Not yet when another selected edge meets one of the run's inner corners:
                     // that edge goes first, and the run then rounds the corner.
-                    let inner: Vec<mt::Vertex> = idx.iter().skip(1).filter_map(|i| es.get(i % m).map(|e| e.front().clone())).collect();
+                    let inner: std::collections::HashSet<mt::VertexID> =
+                        idx.iter().skip(1).filter_map(|i| es.get(i % m).map(|e| e.front().id())).collect();
                     let blocked = per
                         .iter()
-                        .filter(|(_, id)| !ids.contains(id))
-                        .any(|(_, id)| all.iter().find(|e| e.id() == *id).is_some_and(|e| inner.iter().any(|v| v == e.front() || v == e.back())));
+                        .filter(|(_, id)| !in_run.contains(id))
+                        .any(|(_, id)| by_id.get(id).is_some_and(|e| inner.contains(&e.front().id()) || inner.contains(&e.back().id())));
                     if blocked {
                         continue;
                     }
-                    let covered: Vec<Vec3> = per.iter().filter(|(_, id)| ids.contains(id)).map(|(p, _)| *p).collect();
+                    let covered: Vec<Vec3> = per.iter().filter(|(_, id)| in_run.contains(id)).map(|(p, _)| *p).collect();
                     if best.as_ref().is_none_or(|b| covered.len() > b.1.len()) {
                         best = Some((ids, covered));
                     }

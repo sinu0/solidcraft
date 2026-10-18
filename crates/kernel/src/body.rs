@@ -520,6 +520,32 @@ fn same_shared<T: PartialEq>(a: &Option<std::sync::Arc<T>>, b: &Option<std::sync
     }
 }
 
+/// The signed volume of `solid` on a coarse mesh (`span` its size), the faces that mesh missed and
+/// its chord: negative when the faces point inward. A closed solid must have positive volume
+/// (meshed finely enough that every face comes out: a face missing from a coarse mesh can flip
+/// the sign).
+fn orientation_of(solid: &Solid, span: f64) -> Result<(f64, usize, f64)> {
+    let tol = orientation_tolerance(span);
+    let orient = |tol: f64| {
+        guard("orient", || {
+            let shells = mesh_shells(solid, tol);
+            let volume = shells.iter().map(|s| s.to_polygon().volume()).sum::<f64>();
+            let missing =
+                shells.iter().flat_map(|s| s.face_iter()).filter(|f| f.surface().is_none_or(|m| m.faces().triangle_iter().next().is_none())).count();
+            Ok((volume, missing))
+        })
+    };
+    let (mut v, mut missing) = orient(tol)?;
+    // A long thin round part (a through hole's tool: a cylinder whose vertices all lie on
+    // its seam, so they span its length only) meshed that coarsely can come out with a
+    // negative volume when it is outward already: check finely before turning it inside out.
+    let fine = (tol * 0.02).max(1e-4);
+    if v < 0.0 && fine < tol {
+        (v, missing) = orient(fine)?;
+    }
+    Ok((v, missing, tol))
+}
+
 impl Body {
     /// The very same body (shared data), not just an equal-looking one. Its history (how an
     /// operation made it) is not part of it: an operation that leaves a body as it is (a cut by
@@ -543,30 +569,8 @@ impl Body {
             return Err(KernelError::Failed("empty result".into()));
         }
         let mut solid = rephase_revolved(solid);
-        // Orient outward: a closed solid must have positive volume (meshed finely enough that
-        // every face comes out: a face missing from a coarse mesh can flip the sign).
         let span = span_of(&solid);
-        let tol = orientation_tolerance(span);
-        let orient = |tol: f64| {
-            guard("orient", || {
-                let shells = mesh_shells(&solid, tol);
-                let volume = shells.iter().map(|s| s.to_polygon().volume()).sum::<f64>();
-                let missing = shells
-                    .iter()
-                    .flat_map(|s| s.face_iter())
-                    .filter(|f| f.surface().is_none_or(|m| m.faces().triangle_iter().next().is_none()))
-                    .count();
-                Ok((volume, missing))
-            })
-        };
-        let (mut v, mut missing) = orient(tol)?;
-        // A long thin round part (a through hole's tool: a cylinder whose vertices all lie on
-        // its seam, so they span its length only) meshed that coarsely can come out with a
-        // negative volume when it is outward already: check finely before turning it inside out.
-        let fine = (tol * 0.02).max(1e-4);
-        if v < 0.0 && fine < tol {
-            (v, missing) = orient(fine)?;
-        }
+        let (v, missing, tol) = orientation_of(&solid, span)?;
         if v < 0.0 {
             solid.not();
         }
@@ -584,6 +588,23 @@ impl Body {
             history: None,
             display_of: None,
         })
+    }
+
+    /// [`Body::new`]'s orientation check made on a body built without it: a run of local edits
+    /// of an oriented solid (blends, each step kept unmeshed as [`Body::new_placed`] keeps a
+    /// placement) checked once at the end instead of meshing the whole solid after every step.
+    pub(crate) fn oriented_outward(self) -> Result<Body> {
+        if self.mesh.is_some() {
+            return Ok(self);
+        }
+        let span = span_of(&self.solid);
+        let (v, missing, tol) = orientation_of(&self.solid, span)?;
+        if v >= 0.0 {
+            return Ok(Body { coarse_missing: Some((tol, missing)), ..self });
+        }
+        let mut solid = self.deep_copy();
+        solid.not();
+        Ok(Body { solid: std::sync::Arc::new(solid), volume: Some(std::sync::Arc::new(std::sync::Mutex::new(None))), coarse_missing: None, ..self })
     }
 
     /// Like [`Body::new`], for a solid made by placing an already-oriented body (see
@@ -1399,20 +1420,47 @@ impl Body {
     }
 
     /// Index of the edge closest to `p` (by polyline distance).
+    ///
+    /// The polylines come straight from the edge curves (a line's two ends, a curve divided
+    /// within `tol`), in the order of [`Body::unique_edges`] as `tessellate().edges` has them:
+    /// meshing the faces only for this costs a whole-body tessellation per call, and blends call
+    /// it for every selected edge after every edge they round (cubic in the edge count).
     pub fn nearest_edge(&self, p: Vec3, tol: f64) -> Result<Option<(usize, f64)>> {
-        let edges = self.edges(tol)?;
+        let lines: Vec<Vec<Vec3>> = if self.is_mesh() { self.edges(tol)?.into_iter().map(|e| e.points).collect() } else { self.edge_polylines(tol)? };
         let mut best: Option<(usize, f64)> = None;
-        for e in &edges {
-            for w in e.points.windows(2) {
+        for (index, points) in lines.iter().enumerate() {
+            for w in points.windows(2) {
                 if let (Some(a), Some(b)) = (w.first(), w.get(1)) {
                     let d = p.dist_to_segment(*a, *b);
                     if best.is_none_or(|(_, bd)| d < bd) {
-                        best = Some((e.index, d));
+                        best = Some((index, d));
                     }
                 }
             }
         }
         Ok(best)
+    }
+
+    /// Each B-rep edge as a polyline within `tol` of its curve, in [`Body::unique_edges`] order.
+    fn edge_polylines(&self, tol: f64) -> Result<Vec<Vec<Vec3>>> {
+        Self::polylines_of(&Self::unique_edges(&self.solid), tol)
+    }
+
+    /// `edges` as polylines within `tol` of their curves (a line's two ends).
+    pub(crate) fn polylines_of(edges: &[mt::Edge], tol: f64) -> Result<Vec<Vec<Vec3>>> {
+        use mt::{BoundedCurve, ParameterDivision1D};
+        let tol = tol.max(1e-6);
+        edges
+            .iter()
+            .map(|e| {
+                guard("edge polyline", || {
+                    Ok(match e.curve() {
+                        mt::Curve::Line(_) => vec![from_p3(e.front().point()), from_p3(e.back().point())],
+                        c => c.parameter_division(c.range_tuple(), tol).1.into_iter().map(from_p3).collect(),
+                    })
+                })
+            })
+            .collect()
     }
 
     /// Is the point inside the solid?

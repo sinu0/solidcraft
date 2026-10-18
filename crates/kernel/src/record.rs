@@ -368,6 +368,14 @@ pub(crate) fn rebuilt(result: Solid, operands: &[&Solid], rec: &Rebuild) -> Resu
     build(result, &solid_counts(operands), faces, edges.as_ref())
 }
 
+/// [`rebuilt`] for a local edit of an oriented solid (one blend of a run): its faces point the way
+/// the operand's did, so it is not meshed to orient it; the run checks its last result
+/// ([`Body::oriented_outward`](crate::body::Body::oriented_outward)).
+pub(crate) fn rebuilt_local(result: Solid, operands: &[&Solid], rec: &Rebuild) -> Result<Body> {
+    let (faces, edges) = rec.history(&result, operands).unzip();
+    build_placed(result, &solid_counts(operands), faces, edges.as_ref(), false, None)
+}
+
 /// [`rebuilt`] for a body made as it is (a surface, which `Body::new` does not take): its
 /// solid is the one the operation built.
 pub(crate) fn rebuilt_body(body: Body, operands: &[&Solid], rec: &Rebuild) -> Body {
