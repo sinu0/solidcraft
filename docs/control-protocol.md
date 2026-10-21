@@ -6,6 +6,11 @@ line `{"id": …, "ok": true, "result": …}` or `{"id": …, "ok": false, "erro
 handled on the UI thread between frames; pointer and keyboard input is injected as real egui
 events, one pointer event per frame.
 
+Without `--control` or `SOLIDCRAFT_CONTROL_PORT`, the desktop app also opens the channel when an
+installed plugin that is on asks for the `control` permission ([plugins](plugins.md#manifest)):
+on a free port the system picks, so a client finds it by its token file (below). Such a start
+keeps the start page and takes the focus as usual; `--safe-mode` opens no channel for plugins.
+
 ### Token
 
 Every connection must authenticate. At start the app makes a random 256-bit token for this

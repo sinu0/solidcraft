@@ -1632,6 +1632,7 @@
   "ui.plane": "Płaszczyzna",
   "ui.plane_at_angle": "Płaszczyzna pod kątem",
   "ui.plugins": "Wtyczki",
+  "ui.plugins_control": "Używa kanału sterowania: gdy ta wtyczka jest włączona, SolidCraft od następnego uruchomienia nasłuchuje na lokalnym porcie, z kluczem, który możesz odczytać tylko Ty.",
   "ui.plugins_desktop": "Wtyczki są dostępne w aplikacji desktopowej.",
   "ui.plugins_empty": "Brak zainstalowanych wtyczek.",
   "ui.plugins_note": "Każda wtyczka to folder w {path} z plikiem plugin.json. SolidCraft odczytuje ten plik i nie uruchamia żadnego kodu z folderu. Wyłączenie wtyczki nie odinstalowuje jej.",

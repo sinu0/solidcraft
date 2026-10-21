@@ -1632,6 +1632,7 @@
   "ui.plane": "Ebene",
   "ui.plane_at_angle": "Ebene im Winkel",
   "ui.plugins": "Plugins",
+  "ui.plugins_control": "Nutzt den Steuerkanal: Solange dieses Plugin aktiv ist, lauscht SolidCraft ab dem nächsten Start an einem lokalen Port, mit einem Schlüssel, den nur Sie lesen können.",
   "ui.plugins_desktop": "Plugins sind in der Desktop-App verfügbar.",
   "ui.plugins_empty": "Keine Plugins installiert.",
   "ui.plugins_note": "Jedes Plugin ist ein Ordner in {path} mit einer plugin.json. SolidCraft liest diese Datei und führt keinen Code aus dem Ordner aus. Das Ausschalten eines Plugins lässt es installiert.",

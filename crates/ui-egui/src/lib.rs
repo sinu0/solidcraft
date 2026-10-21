@@ -151,6 +151,7 @@ pub mod params_dialog;
 pub(crate) mod pick_buffer;
 pub(crate) mod pick_index;
 pub(crate) mod plugins;
+pub use plugins::control_plugins;
 pub mod prefs;
 pub mod prefs_notice;
 #[cfg(test)]

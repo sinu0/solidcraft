@@ -9,6 +9,29 @@ This document adds **parametric timeline features**: a generic host-owned featur
 plugins fill with parameters, display metadata, and rebuild logic, without a second timeline
 model or a private geometry API.
 
+## Manifest
+
+What the desktop app reads today (Preferences › Plugins, `crates/ui-egui/src/plugins.rs`): a
+folder `{data}/plugins/<id>/plugin.json` with
+
+```json
+{"id": "turnpad", "name": "Turnpad", "version": "1.1.0", "description": "…", "permissions": ["control"]}
+```
+
+`id` matches the folder (1–64 lowercase letters, digits, hyphens), `name` ≤ 80 characters,
+`version` ≤ 32 of letters, digits, `.`, `-`, `+`, `description` ≤ 240, all on one line; any other
+member makes the folder a skipped one. Nothing in the folder runs. The user turns a plugin off on
+the page (`disabled_plugins` in the preferences).
+
+`permissions` is optional. The one permission this version knows is **`control`**: while such a
+plugin is installed and on, the app opens its [control channel](control-protocol.md) at start on a
+free loopback port, with the usual per-launch token file only the user can read. It is for a
+plugin that stands for a program outside SolidCraft (a dial or 3D-mouse driver, a test rig), which
+otherwise needs `SOLIDCRAFT_CONTROL_PORT` in the user's session. A manifest that asks for a
+permission this version does not know is skipped rather than loaded with less than it asked for;
+the wasm host's permissions will join the same list. Turning the plugin on or off takes effect at
+the next start; a client that reads `disabled_plugins` through `ui.prefs` can let go at once.
+
 ## Goals (unchanged from #1221)
 
 - Sandboxed by default: manifest permissions, fuel/memory limits on desktop, broker enforcement on web.

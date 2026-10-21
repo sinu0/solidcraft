@@ -3,6 +3,12 @@
 //! A plugin is a directory of `{data}/plugins/<id>/plugin.json`. This page reads that file and
 //! records which ids are turned off. It does not load or run anything from the folder. Running a
 //! plugin (the wasm host in docs/plugins.md) is a later step; it will honour `disabled_plugins`.
+//!
+//! A manifest may ask for permissions. The one this version knows is `control`: while such a
+//! plugin is installed and on, the desktop app opens its control channel at start on a free
+//! loopback port (docs/control-protocol.md), for a program outside SolidCraft that the plugin
+//! stands for. A manifest that asks for anything else is skipped, so a plugin never runs with
+//! less than it expects.
 
 use std::path::{Path, PathBuf};
 
@@ -15,6 +21,10 @@ use crate::SolveApp;
 pub const MAX_DISABLED: usize = 256;
 /// `plugin.json` larger than this is refused.
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
+/// The permission that opens the control channel at start.
+pub const CONTROL: &str = "control";
+/// The permissions a manifest may ask for.
+const PERMISSIONS: &[&str] = &[CONTROL];
 
 /// One installed plugin, as its manifest describes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -23,6 +33,15 @@ pub struct Plugin {
     pub name: String,
     pub version: String,
     pub description: String,
+    /// The permissions it asks for, each one of [`PERMISSIONS`], sorted, no repeats.
+    pub permissions: Vec<String>,
+}
+
+impl Plugin {
+    /// Whether it asks for the control channel.
+    pub fn wants_control(&self) -> bool {
+        self.permissions.iter().any(|p| p == CONTROL)
+    }
 }
 
 /// A folder under the plugins directory that is not a plugin.
@@ -40,6 +59,8 @@ struct Manifest {
     version: String,
     #[serde(default)]
     description: String,
+    #[serde(default)]
+    permissions: Vec<String>,
 }
 
 /// The plugins directory: `$XDG_DATA_HOME/solidcraft/plugins` (and the platform equivalents of
@@ -81,7 +102,18 @@ fn check(m: Manifest, folder: &str) -> Result<Plugin, String> {
     if description.chars().count() > 240 || description.chars().any(|c| c.is_control()) {
         return Err("the description must be at most 240 characters with no line breaks".into());
     }
-    Ok(Plugin { id: m.id, name: name.to_string(), version: version.to_string(), description: description.to_string() })
+    let mut permissions = Vec::new();
+    for p in &m.permissions {
+        if !PERMISSIONS.contains(&p.as_str()) {
+            let known = PERMISSIONS.join(", ");
+            return Err(format!("permission `{}` is not one this SolidCraft knows ({known})", p.chars().take(32).collect::<String>()));
+        }
+        if !permissions.contains(p) {
+            permissions.push(p.clone());
+        }
+    }
+    permissions.sort();
+    Ok(Plugin { id: m.id, name: name.to_string(), version: version.to_string(), description: description.to_string(), permissions })
 }
 
 fn read_plugin(dir: &Path, folder: &str) -> Result<Plugin, String> {
@@ -127,6 +159,19 @@ pub fn scan(dir: &Path) -> (Vec<Plugin>, Vec<Skipped>) {
 /// Whether an installed plugin is offered. Unknown ids are on; an id in `disabled_plugins` is off.
 pub fn enabled(app: &SolveApp, id: &str) -> bool {
     !app.preferences.disabled_plugins.contains(id)
+}
+
+/// The installed plugins that are on and ask for the control channel, by id. Desktop only; empty
+/// when there is no plugins folder.
+pub fn control_plugins(app: &SolveApp) -> Vec<String> {
+    let Some(dir) = plugins_dir().filter(|_| !cfg!(target_arch = "wasm32")) else {
+        return Vec::new();
+    };
+    control_plugins_in(&dir, &app.preferences.disabled_plugins)
+}
+
+fn control_plugins_in(dir: &Path, disabled: &std::collections::BTreeSet<String>) -> Vec<String> {
+    scan(dir).0.into_iter().filter(|p| p.wants_control() && !disabled.contains(&p.id)).map(|p| p.id).collect()
 }
 
 /// The Plugins page. Desktop only: the browser build has no per-user plugin folder.
@@ -176,6 +221,9 @@ pub fn page(app: &mut SolveApp, ui: &mut egui::Ui) {
                 );
                 if !plugin.description.is_empty() {
                     ui.label(RichText::new(&plugin.description).size(t.font_small).color(t.text_dim));
+                }
+                if plugin.wants_control() {
+                    ui.add(egui::Label::new(RichText::new(crate::i18n::tr("ui.plugins_control")).size(t.font_small).color(t.text_dim)).wrap());
                 }
             });
         });
@@ -233,10 +281,32 @@ mod tests {
         assert!(!valid_id("a-"));
         assert!(!valid_id("FTC"));
         assert!(!valid_id(&"a".repeat(65)));
-        let bad = Manifest { id: "gear".into(), name: "Gear\nbox".into(), version: "1".into(), description: String::new() };
+        let bad = Manifest { id: "gear".into(), name: "Gear\nbox".into(), version: "1".into(), description: String::new(), permissions: vec![] };
         assert!(check(bad, "gear").is_err());
-        let big = Manifest { id: "gear".into(), name: "Gear".into(), version: "1".into(), description: "x".repeat(241) };
+        let big = Manifest { id: "gear".into(), name: "Gear".into(), version: "1".into(), description: "x".repeat(241), permissions: vec![] };
         assert!(check(big, "gear").unwrap_err().contains("240"));
+    }
+
+    #[test]
+    fn only_a_plugin_that_asks_for_control_and_is_on_opens_the_control_channel() {
+        let dir = std::env::temp_dir().join(format!("solidcraft-plugins-control-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        write(&dir, "turnpad", r#"{"id":"turnpad","name":"Turnpad","version":"1.1.0","permissions":["control","control"]}"#);
+        write(&dir, "parts", r#"{"id":"parts","name":"Parts","version":"1"}"#);
+        write(&dir, "greedy", r#"{"id":"greedy","name":"Greedy","version":"1","permissions":["control","files"]}"#);
+        let (plugins, skipped) = scan(&dir);
+        let turnpad = plugins.iter().find(|p| p.id == "turnpad").unwrap();
+        assert_eq!(turnpad.permissions, vec![CONTROL.to_string()], "a repeated permission counts once");
+        assert!(!plugins.iter().find(|p| p.id == "parts").unwrap().wants_control());
+        let greedy = skipped.iter().find(|s| s.folder == "greedy").unwrap();
+        assert!(greedy.reason.contains("`files`"), "{}", greedy.reason);
+        let mut disabled = std::collections::BTreeSet::new();
+        assert_eq!(control_plugins_in(&dir, &disabled), vec!["turnpad".to_string()]);
+        disabled.insert("turnpad".to_string());
+        assert!(control_plugins_in(&dir, &disabled).is_empty(), "turned off: no channel");
+        assert!(control_plugins_in(&dir.join("missing"), &std::collections::BTreeSet::new()).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

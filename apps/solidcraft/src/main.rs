@@ -10,7 +10,8 @@
 //!
 //! `--control <port>` (or `SOLIDCRAFT_CONTROL_PORT`) starts a localhost JSON-lines control
 //! server: `{"id":1,"method":"engine.execute","params":{"command":"solid.box","params":{…}}}`.
-//! See `solidcraft_ui_egui::control` and docs/control-protocol.md.
+//! See `solidcraft_ui_egui::control` and docs/control-protocol.md. Without either, an installed
+//! plugin that is on and asks for the `control` permission opens it on a free port (docs/plugins.md).
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![deny(unsafe_code)]
@@ -690,6 +691,16 @@ fn main() -> eframe::Result {
             if let Some(port) = control_port {
                 let rx = control_server::start(port, cc.egui_ctx.clone());
                 app = app.with_control(rx);
+            } else if !safe_mode {
+                // A plugin that is on and asks for the `control` permission (Preferences › Plugins)
+                // opens the channel on a free port. Unlike `--control` it changes nothing else
+                // about the start: the start page and the focus stay as they are.
+                let wanted = solidcraft_ui_egui::control_plugins(&app);
+                if !wanted.is_empty() {
+                    eprintln!("solidcraft: control channel opened for the plugin(s) {}", wanted.join(", "));
+                    let rx = control_server::start(0, cc.egui_ctx.clone());
+                    app = app.with_control(rx);
+                }
             }
             // The agent chat's MCP bridge reaches the app through an endpoint of its own, started
             // on a free port the first time the chat connects (docs/agent-chat.md).
