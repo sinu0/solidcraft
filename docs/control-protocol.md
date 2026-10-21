@@ -7,9 +7,11 @@ handled on the UI thread between frames; pointer and keyboard input is injected 
 events, one pointer event per frame.
 
 Without `--control` or `SOLIDCRAFT_CONTROL_PORT`, the desktop app also opens the channel when an
-installed plugin that is on asks for the `control` permission ([plugins](plugins.md#manifest)):
-on a free port the system picks, so a client finds it by its token file (below). Such a start
-keeps the start page and takes the focus as usual; `--safe-mode` opens no channel for plugins.
+installed plugin that is on and that the user allowed the `control` permission
+([plugins](plugins.md#control-a-program-outside-solidcraft)) asks for it: on a free port the
+system picks. Either way such a plugin's program finds the port and token in its endpoint file
+`<control folder>/plugin-<id>.json`. Such a start keeps the start page and takes the focus as
+usual; `--safe-mode` opens no channel for plugins.
 
 ### Token
 

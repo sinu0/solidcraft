@@ -10,14 +10,58 @@ use std::path::{Path, PathBuf};
 /// Shortest token accepted from `SOLIDCRAFT_CONTROL_TOKEN` (hex characters).
 pub const MIN_TOKEN_LEN: usize = 32;
 
-/// The token file of the app listening on `port`: `<data folder>/control/<port>.token`
-/// (`SOLIDCRAFT_CONTROL_DIR` replaces the folder).
+/// The folder of the token files: `<data folder>/control` (`SOLIDCRAFT_CONTROL_DIR` replaces it).
+pub fn control_dir() -> Option<PathBuf> {
+    match solidcraft_geom::env::var_os("CONTROL_DIR").filter(|d| !d.is_empty()) {
+        Some(d) => Some(PathBuf::from(d)),
+        None => Some(crate::recovery::data_dir()?.join("control")),
+    }
+}
+
+/// The token file of the app listening on `port`: `<control dir>/<port>.token`.
 pub fn token_path(port: u16) -> Option<PathBuf> {
-    let dir = match solidcraft_geom::env::var_os("CONTROL_DIR").filter(|d| !d.is_empty()) {
-        Some(d) => PathBuf::from(d),
-        None => crate::recovery::data_dir()?.join("control"),
-    };
-    Some(dir.join(format!("{port}.token")))
+    Some(control_dir()?.join(format!("{port}.token")))
+}
+
+/// Where the app tells the program of plugin `id` (one that asks for the `control` permission,
+/// docs/plugins.md) how to reach its control channel: `<control dir>/plugin-<id>.json`, a
+/// [`PluginEndpoint`] only the user can read. `None` for an id that is not a plugin id.
+pub fn plugin_endpoint_path(id: &str) -> Option<PathBuf> {
+    crate::plugins::valid_id(id).then_some(())?;
+    Some(control_dir()?.join(format!("plugin-{id}.json")))
+}
+
+/// What [`plugin_endpoint_path`] holds: the loopback port, the token to send first, and the
+/// process id of the app (a client may check that it still runs).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PluginEndpoint {
+    pub port: u16,
+    pub token: String,
+    pub pid: u32,
+}
+
+/// Write the endpoint file of plugin `id`, private to the user as a token file is.
+pub fn write_plugin_endpoint(id: &str, endpoint: &PluginEndpoint) -> Result<PathBuf> {
+    let path = plugin_endpoint_path(id).ok_or_else(|| Error::new(ErrorKind::InvalidInput, "no endpoint file for this plugin id"))?;
+    let text = serde_json::to_string(endpoint).map_err(Error::other)?;
+    write_token_file(&path, &text)?;
+    Ok(path)
+}
+
+/// The endpoint the app wrote for plugin `id`, if there is a readable one.
+pub fn read_plugin_endpoint(id: &str) -> Option<PluginEndpoint> {
+    let text = std::fs::read_to_string(plugin_endpoint_path(id)?).ok().filter(|t| t.len() <= 4096)?;
+    serde_json::from_str(text.trim()).ok()
+}
+
+/// Remove plugin `id`'s endpoint file if it still names the app with process id `pid`, so an app
+/// that ends does not remove the file a later launch wrote.
+pub fn remove_plugin_endpoint(id: &str, pid: u32) {
+    if read_plugin_endpoint(id).is_some_and(|e| e.pid == pid)
+        && let Some(path) = plugin_endpoint_path(id)
+    {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// A token set on purpose with `SOLIDCRAFT_CONTROL_TOKEN` (test harnesses, sandboxed packages
@@ -127,5 +171,14 @@ mod tests {
         drop(TokenFile(path.clone()));
         assert!(!path.exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_plugin_endpoint_names_only_a_plugin_id() {
+        assert!(plugin_endpoint_path("../token").is_none());
+        assert!(plugin_endpoint_path("Turnpad").is_none());
+        if let Some(p) = plugin_endpoint_path("turnpad") {
+            assert_eq!(p.file_name().and_then(|f| f.to_str()), Some("plugin-turnpad.json"));
+        }
     }
 }

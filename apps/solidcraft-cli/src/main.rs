@@ -15,6 +15,7 @@
 //! solidcraft-cli mcp [--in design|script] [--connect HOST:PORT [--token T]] [--allow-path DIR]... [--allow-any-path]
 //!                    [--param-check off|warn|strict]
 //!                                                             MCP server on stdio (docs/mcp.md)
+//! solidcraft-cli plugins [list|check <folder>|dir|endpoint <id>]  installed plugins (docs/plugins.md)
 //! solidcraft-cli licences                                     SolidCraft's licence and the third-party licences
 //! solidcraft-cli icon --out F.png|F.ico [--size N]             the app icon (packaging; drawn, not a file)
 //!
@@ -28,6 +29,7 @@ mod crashes;
 mod fuzz;
 mod logger;
 mod oracle;
+mod plugins;
 mod preview;
 mod recipe;
 mod render;
@@ -79,6 +81,9 @@ const USAGE: &str = "usage:
   solidcraft-cli mcp [--in design.solidcraft|script.json] [--connect 127.0.0.1:PORT [--token T]] [--allow-path DIR]... [--allow-any-path]
                      [--param-check off|warn|strict]
   solidcraft-cli crashes [list [--json] | show <id> | replay <id> | dir | clear [<id>]]
+  solidcraft-cli plugins [list [--json] | check <folder> | dir | endpoint <id>]
+      (the plugins installed for this user; check: a plugin folder's plugin.json as the app reads it;
+       endpoint: the control channel port the running app left for a plugin allowed `control`)
   solidcraft-cli licences
   solidcraft-cli gpu [--policy auto|hardware|software|cpu]
       (the GPU adapters a headless render can open, best first, the one the policy picks and the tier it
@@ -122,6 +127,7 @@ fn main() -> ExitCode {
         Some("fuzz-one") => fuzz::one(&args[1..]),
         Some("mcp") => cmd_mcp(&args[1..]),
         Some("crashes") => crashes::run(&args[1..]),
+        Some("plugins") => plugins::run(&args[1..]),
         Some("icon") => cmd_icon(&args[1..]),
         Some("licences" | "licenses") => {
             // Written, not print!ed: a closed pipe (`| head`) is not a crash.

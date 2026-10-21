@@ -502,6 +502,9 @@ preference_settings! {
     selection_shift_add_only: bool = false, 6;
     /// Plugin ids turned off (Preferences › Plugins). An installed plugin whose id is absent is on.
     disabled_plugins: std::collections::BTreeSet<String> = std::collections::BTreeSet::new(), PAGE_PLUGINS;
+    /// Per plugin id, the permissions the user allowed (Preferences › Plugins). A plugin that asks
+    /// for a permission not listed here is not used until the user allows it.
+    plugin_permissions: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> = Default::default(), PAGE_PLUGINS;
 }
 
 /// What a middle-button double-click in the view does.
@@ -1656,14 +1659,11 @@ pub fn migrate(mut p: Prefs) -> Prefs {
     p
 }
 
-/// Drop plugin ids this page would not show, and keep at most [`crate::plugins::MAX_DISABLED`],
-/// so a hand-edited preferences file cannot carry a huge or nonsense list. `set` still refuses
-/// those instead of dropping them.
+/// Drop plugin choices the Plugins page would not show (see
+/// [`solidcraft_engine::plugins::limit_choices`]), so a hand-edited preferences file cannot carry a
+/// huge or nonsense list. `set` still refuses those instead of dropping them.
 fn limit_disabled_plugins(mut p: Prefs) -> Prefs {
-    p.disabled_plugins.retain(|id| crate::plugins::valid_id(id));
-    if p.disabled_plugins.len() > crate::plugins::MAX_DISABLED {
-        p.disabled_plugins = p.disabled_plugins.into_iter().take(crate::plugins::MAX_DISABLED).collect();
-    }
+    solidcraft_engine::plugins::limit_choices(&mut p.disabled_plugins, &mut p.plugin_permissions);
     p
 }
 
@@ -1729,9 +1729,10 @@ pub fn set(app: &mut SolveApp, p: &serde_json::Value) -> Result<serde_json::Valu
     if new.ui_font != app.preferences.ui_font && !new.ui_font.trim().is_empty() && crate::fonts::ui_font(&new.ui_font).is_none() {
         return Err(format!("`ui_font`: `{}` is not an installed font family or a readable font file", new.ui_font.trim()));
     }
-    if new.disabled_plugins.len() > crate::plugins::MAX_DISABLED || new.disabled_plugins.iter().any(|id| !crate::plugins::valid_id(id)) {
-        return Err(format!("`disabled_plugins` must be at most {} ids of lowercase letters, digits and hyphens", crate::plugins::MAX_DISABLED));
-    }
+    solidcraft_engine::plugins::check_choices(solidcraft_engine::plugins::Choices {
+        disabled: &new.disabled_plugins,
+        allowed: &new.plugin_permissions,
+    })?;
     if !accepted::ui_scale(&new) || !accepted::look_at_speed(&new) {
         return Err("`ui_scale` must be 0.5…2.5 and `look_at_speed` 0.25…4".into());
     }

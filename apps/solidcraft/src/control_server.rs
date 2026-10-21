@@ -30,23 +30,45 @@ fn new_token() -> Option<String> {
     Some(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// Remove this launch's token file (at exit).
+/// The plugins this launch wrote an endpoint file for, removed when the app ends.
+static PLUGIN_ENDPOINTS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Remove this launch's token files and plugin endpoint files (at exit).
 pub fn remove_token_file() {
     if let Ok(files) = TOKEN_FILES.lock() {
         for p in files.iter() {
             let _ = std::fs::remove_file(p);
         }
     }
+    if let Ok(ids) = PLUGIN_ENDPOINTS.lock() {
+        for id in ids.iter() {
+            control_auth::remove_plugin_endpoint(id, std::process::id());
+        }
+    }
 }
 
-pub fn start(port: u16, ctx: egui::Context) -> Receiver<ControlRequest> {
+/// Start the control channel on `port` (0: a free port). `plugins`: the ids of the plugins that
+/// are on and allowed the `control` permission (docs/plugins.md); each gets an endpoint file
+/// with the port and token, so its program finds the channel without being told the port.
+pub fn start(port: u16, ctx: egui::Context, plugins: &[String]) -> Receiver<ControlRequest> {
     let (tx, rx) = channel::<ControlRequest>();
     // Every connection must show the token before anything runs (docs/control-protocol.md).
-    match control_auth::env_token().or_else(new_token) {
-        Some(token) => {
-            listen(port, token, tx, ctx, false);
+    let Some(token) = control_auth::env_token().or_else(new_token) else {
+        eprintln!("solidcraft: control server not started: no random token available");
+        return rx;
+    };
+    let Some(port) = listen(port, token.clone(), tx, ctx, false) else { return rx };
+    let endpoint = control_auth::PluginEndpoint { port, token, pid: std::process::id() };
+    for id in plugins {
+        match control_auth::write_plugin_endpoint(id, &endpoint) {
+            Ok(path) => {
+                eprintln!("solidcraft: control channel endpoint for the plugin `{id}` in {}", path.display());
+                if let Ok(mut ids) = PLUGIN_ENDPOINTS.lock() {
+                    ids.push(id.clone());
+                }
+            }
+            Err(e) => eprintln!("solidcraft: the control channel endpoint for the plugin `{id}` could not be written ({e})"),
         }
-        None => eprintln!("solidcraft: control server not started: no random token available"),
     }
     rx
 }

@@ -16,6 +16,7 @@ pub mod fuzz;
 pub mod licences;
 pub mod occurrences;
 pub mod params;
+pub mod plugins;
 pub mod product_scene;
 pub mod recovery;
 pub mod render_jobs;
