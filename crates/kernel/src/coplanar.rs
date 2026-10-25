@@ -1238,15 +1238,23 @@ pub(crate) fn imprint_union(a: &Body, b: &Body, accept: &dyn Fn(&Body) -> bool) 
 /// faces): every such pair of faces goes and the shells are stitched along their edges. `None`
 /// when no such pair of faces exists.
 pub(crate) fn glue(a: &Body, b: &Body) -> Option<Result<Body>> {
-    glue_impl(a, b, false)
+    glue_impl(a, b, false, false)
 }
 
 /// Glue every certified start cap, retaining each tool's original contact tolerance.
 pub(crate) fn glue_all_caps(a: &Body, b: &Body) -> Option<Result<Body>> {
-    glue_impl(a, b, true)
+    glue_impl(a, b, true, false)
 }
 
-fn glue_impl(a: &Body, b: &Body, all_caps: bool) -> Option<Result<Body>> {
+/// `a` cut by `b` where `b` lies inside `a` but for a planar face it shares with `a` (same plane,
+/// same normal, the same edges): `b`'s other faces, turned inside out, take that face's place, as
+/// [`glue`] takes the matching faces out of a join. The caller makes sure `b` lies inside `a`
+/// (see `whole_face::carve`). `None` when no face is shared.
+pub(crate) fn carve(a: &Body, b: &Body) -> Option<Result<Body>> {
+    glue_impl(a, b, false, true)
+}
+
+fn glue_impl(a: &Body, b: &Body, all_caps: bool, carve: bool) -> Option<Result<Body>> {
     use mt::{BoundedCurve, ParametricCurve};
     let size = a.size().max(b.size());
     let tol = (size * 1e-7).max(1e-9) * 10.0;
@@ -1292,7 +1300,10 @@ fn glue_impl(a: &Body, b: &Body, all_caps: bool) -> Option<Result<Body>> {
             }
             let tol = if all_caps { (a.size().max(*tool_sizes.get(&fb_list.get(*ib)?.id())?) * 1e-7).max(1e-9) * 10.0 } else { tol };
             let key = |p: Vec3| ((p.x / tol).round() as i64, (p.y / tol).round() as i64, (p.z / tol).round() as i64);
-            if glued_a.contains(ia) || glued_b.contains(ib) || x.n.dot(y.n) > -1.0 + 1e-9 || (x.d + y.d).abs() > tol {
+            // A join glues faces back to back, a carve faces lying on each other.
+            let apart =
+                if carve { x.n.dot(y.n) < 1.0 - 1e-9 || (x.d - y.d).abs() > tol } else { x.n.dot(y.n) > -1.0 + 1e-9 || (x.d + y.d).abs() > tol };
+            if glued_a.contains(ia) || glued_b.contains(ib) || apart {
                 continue;
             }
             let (Some(fa), Some(fb)) = (fa_list.get(*ia), fb_list.get(*ib)) else { continue };
@@ -1398,7 +1409,8 @@ fn glue_impl(a: &Body, b: &Body, all_caps: bool) -> Option<Result<Body>> {
                 })
                 .collect();
             let mut nf = mt::Face::try_new(wires, f.surface()).map_err(|e| fail(&e.to_string()))?;
-            if !f.orientation() {
+            // Carved out, `b`'s faces look into it.
+            if f.orientation() == carve {
                 nf.invert();
             }
             faces.push(nf);

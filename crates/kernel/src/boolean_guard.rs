@@ -214,5 +214,42 @@ pub(crate) fn check_retry(a: &Body, b: &Body, op: BoolOp, result: Option<&Body>)
     if let Some(p) = stray_point(&ma, &near_r, &region) {
         return Err(bad(op, format!("it would remove part of the body away from the tool, at {} (outside the tool's region)", at(p))));
     }
+    // A void a cut seals in the body lies wholly inside it, clear of its surface (a tool wholly
+    // inside), or is one it had already. One that lies partly on the body's surface has a face of
+    // the body over it as a skin of no thickness (a pocket's floor cut on down, kept over the
+    // space the cut took).
+    if op == BoolOp::Cut
+        && r.shell_count() > a.shell_count()
+        && let Some(p) = skin_over_void(r, &mr, &near_a)
+    {
+        return Err(bad(op, format!("it would leave a sealed void under a skin of no thickness, at {}", at(p))));
+    }
     Ok(())
+}
+
+/// A point of a void of `r` (an inner shell, its faces looking into it) on the surface `near`
+/// stands for, where other points of the same void are not on it. `mesh`: `r` tessellated.
+fn skin_over_void(r: &Body, mesh: &Mesh, near: &Near) -> Option<Vec3> {
+    // Each face's shell, in the order the mesh numbers faces.
+    let shell_of: Vec<usize> = r.solid.boundaries().iter().enumerate().flat_map(|(k, sh)| std::iter::repeat_n(k, sh.face_iter().count())).collect();
+    let shells = r.solid.boundaries().len();
+    let mut volume = vec![0.0; shells];
+    for (t, f) in mesh.triangles.iter().zip(&mesh.tri_face) {
+        let (Some([p, q, s]), Some(k)) = (mesh.tri(t), shell_of.get(*f as usize)) else { continue };
+        if let Some(v) = volume.get_mut(*k) {
+            *v += p.dot(q.cross(s)) / 6.0;
+        }
+    }
+    (0..shells).filter(|k| volume.get(*k).is_some_and(|v| *v < 0.0)).find_map(|k| {
+        let points: Vec<Vec3> = mesh
+            .triangles
+            .iter()
+            .zip(&mesh.tri_face)
+            .filter(|(_, f)| shell_of.get(**f as usize) == Some(&k))
+            .filter_map(|(t, _)| mesh.tri(t))
+            .map(|[p, q, s]| (p + q + s) / 3.0)
+            .collect();
+        let on = points.iter().find(|p| near.close(**p))?;
+        points.iter().any(|p| !near.close(*p)).then_some(*on)
+    })
 }

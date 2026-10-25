@@ -1451,3 +1451,58 @@ fn join_that_meets_no_body_keeps_the_piece_and_says_so() {
     let combine = s.execute("solid.combine", &json!({"target": "A", "tools": ["B"], "operation": "join"})).unwrap();
     assert!(combine["warning"].is_null(), "{combine}");
 }
+
+/// A tapered pocket's floor, its corners rounded where the slanted corner edges were filleted,
+/// extruded on down as a cut: the boolean failed on the fitted corner arcs of the profile, and
+/// its retry kept the old floor as a skin over a sealed void. The face itself is the tool now:
+/// one shell, the old floor gone, the floor's area times the depth taken, no retry.
+#[test]
+fn a_tapered_pocket_floor_cut_on_down_after_corner_rounds_leaves_no_skin() {
+    let mut script: Value =
+        serde_json::from_str(include_str!("../../../examples/regressions/tapered_pocket_floor_cut_after_corner_rounds.json")).unwrap();
+    let last = script["commands"].as_array_mut().unwrap().pop().unwrap();
+    let mut s = replay_value(&script);
+    let faces = |s: &mut Session| s.execute("model.faces", &json!({"body": "Box"})).unwrap()["faces"].as_array().unwrap().clone();
+    let at = |faces: &[Value], z: f64| -> Vec<f64> {
+        faces
+            .iter()
+            .filter(|f| f["plane_normal"].is_array() && f["plane_normal"][2].as_f64().unwrap().abs() > 1.0 - 1e-9)
+            .filter(|f| (f["centroid"][2].as_f64().unwrap() - z).abs() < 1e-6)
+            .map(|f| f["area"].as_f64().unwrap())
+            .collect()
+    };
+    let floor = at(&faces(&mut s), 25.0);
+    let [area] = floor.as_slice() else { panic!("one floor at z 25: {floor:?}") };
+    let before = volume(&s, "Box");
+    let r = s.execute(last["command"].as_str().unwrap(), &last["params"]).unwrap();
+    assert!(r["warning"].is_null(), "{r}");
+    let after = faces(&mut s);
+    assert!(at(&after, 25.0).is_empty(), "the old floor stays: {after:?}");
+    let new_floor = at(&after, 20.0);
+    assert!(matches!(new_floor.as_slice(), [a] if (a - area).abs() < 1e-3 * area), "{new_floor:?}, the floor was {area}");
+    assert_eq!(s.model.state().body("Box").map(|b| b.body.shell_count()), Some(1));
+    let removed = before - volume(&s, "Box");
+    assert!((removed - area * 5.0).abs() < 1e-3 * area * 5.0, "removed {removed}, the floor times 5 mm is {}", area * 5.0);
+}
+
+/// The same floor cut on down with the pocket's taper: its tool is the fitted profile, tapered,
+/// and the boolean's retry kept the old floor as a skin over a sealed void. The cut comes out
+/// without the skin, or is refused and leaves the body as it was: never the skin.
+#[test]
+fn a_tapered_cut_on_down_from_a_rounded_pocket_floor_leaves_no_skin() {
+    let mut script: Value =
+        serde_json::from_str(include_str!("../../../examples/regressions/tapered_pocket_floor_cut_after_corner_rounds.json")).unwrap();
+    let commands = script["commands"].as_array_mut().unwrap();
+    commands.last_mut().unwrap()["params"]["taper"] = json!("-10 deg");
+    let last = commands.pop().unwrap();
+    let mut s = replay_value(&script);
+    let before = volume(&s, "Box");
+    let result = s.execute(last["command"].as_str().unwrap(), &last["params"]);
+    let faces = s.execute("model.faces", &json!({"body": "Box"})).unwrap()["faces"].as_array().unwrap().clone();
+    let at_25 = faces.iter().filter(|f| f["plane_normal"].is_array() && (f["centroid"][2].as_f64().unwrap() - 25.0).abs() < 1e-6).count();
+    assert_eq!(s.model.state().body("Box").map(|b| b.body.shell_count()), Some(1), "{result:?}");
+    match result {
+        Ok(r) => assert_eq!(at_25, 0, "the old floor stays: {r}"),
+        Err(e) => assert!((volume(&s, "Box") - before).abs() < 1e-9 && at_25 == 1, "{e}"),
+    }
+}

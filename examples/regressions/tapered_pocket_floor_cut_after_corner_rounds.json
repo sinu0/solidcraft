@@ -1,0 +1,15 @@
+{
+ "description": "An 80 x 80 x 40 block with a 60 x 60 pocket cut 15 deep from the top with a -10 deg taper (its floor 54.7 mm across at z 25), its rim and its four slanted corner edges filleted R3, then the pocket's floor extruded 5 mm further down as a cut, so the pocket goes on without a step. The floor's corners are the elliptic arcs where the corner rounds meet it, fitted in the profile: the cut's boolean failed on them, and its retry nudged the tool and kept the old floor at z 25 as a skin over a sealed void, so the pocket looked as deep as before. Result: one shell, the floor at z 20, the floor's area times 5 mm taken.",
+ "commands": [
+  {"command": "sketch.create", "params": {"plane": "XY", "offset": 0, "name": "Block"}},
+  {"command": "sketch.rectangle.two_point", "params": {"p0": [0, 0], "p1": [80, 80]}},
+  {"command": "sketch.finish", "params": {}},
+  {"command": "solid.extrude", "params": {"sketch": "Block", "distance": 40, "body_name": "Box"}},
+  {"command": "sketch.create", "params": {"plane": "XY", "offset": 40, "name": "Pocket"}},
+  {"command": "sketch.rectangle.two_point", "params": {"p0": [10, 10], "p1": [70, 70]}},
+  {"command": "sketch.finish", "params": {}},
+  {"command": "solid.extrude", "params": {"sketch": "Pocket", "distance": -15, "taper": "-10 deg", "operation": "cut", "targets": ["Box"]}},
+  {"command": "solid.fillet", "params": {"edges": [[40, 10, 40], [70, 40, 40], [40, 70, 40], [10, 40, 40], [11.322452, 11.322452, 32.5], [68.677548, 11.322452, 32.5], [68.677548, 68.677548, 32.5], [11.322452, 68.677548, 32.5]], "radius": 3}},
+  {"command": "solid.extrude", "params": {"face": [40, 40, 25], "distance": -5, "operation": "cut", "targets": ["Box"]}}
+ ]
+}

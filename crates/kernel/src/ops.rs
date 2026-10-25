@@ -924,6 +924,12 @@ fn boolean_untimed(a: &Body, b: &Body, op: BoolOp) -> Result<Option<Body>> {
     if let Some(r) = with_hollow_tool(a, b, op) {
         return finished(a, b, op, Ok(r));
     }
+    // A face of the body swept back into it: carved out along the face, nothing to intersect.
+    if op == BoolOp::Cut
+        && let Some(Ok(r)) = guard("carve a face's prism", || Ok(crate::whole_face::carve(a, b))).ok().flatten()
+    {
+        return finished(a, b, op, Ok(Some(r)));
+    }
     // Earlier coarse bores can leave a junction a later pattern copy cannot intersect.
     // Resolve conical-cut junctions from the first copy, while the operands are unchanged.
     if op == BoolOp::Cut && !APART.with(|c| c.get()) && conical_cut_junction(a, b) {

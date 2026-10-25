@@ -231,7 +231,8 @@ fn inside(poly: &[Vec2], q: Vec2) -> bool {
 /// A tool cutting `depth` into `target` from its planar face `face`, as the face swept would, with
 /// the walls that only touch the body moved off it: the face's outline keeps its edges whose walls
 /// cut into the body, exactly (the body's own edges), and runs round the others well outside it.
-/// The tool starts a little out from the face, so its cap does not lie on it. `None` when no wall
+/// The tool starts a little out from the face, so its cap does not lie on it; where every wall
+/// cuts, it is the face itself swept back, its cap the face. `None` when no wall
 /// cuts (the face's prism takes only what is over it, see [`cut_takes_only_the_face`]), when an
 /// edge's wall changes from touching to cutting along it, or when anything of the body within the
 /// depth lies where the outline runs round. Its faces come from those of `built` (the profile's
@@ -252,8 +253,18 @@ fn build_cut_tool(target: &Body, face: WholeFace, depth: f64, built: Option<&Bod
     let mesh = target.tessellate(tol * 0.2).ok()?;
     let n = face.normal;
     let walls = walls(&mesh, face.face, n, 1e-6)?;
-    if !walls.iter().any(|(_, w)| *w == Wall::Cuts) || !walls.iter().any(|(_, w)| *w == Wall::Touches) {
+    if !walls.iter().any(|(_, w)| *w == Wall::Cuts) {
         return None;
+    }
+    // Every wall cuts (the floor of a pocket whose sides lean out from it): the face itself swept
+    // back into the body, which the cut carves out along the face (see [`carve`]).
+    if !walls.iter().any(|(_, w)| *w == Wall::Touches) {
+        let f = target.solid.face_iter().nth(face.face)?;
+        let swept = Body::new(mt::builder::tsweep(f, v3(n * -depth))).ok()?;
+        return match built {
+            Some(built) => traced_onto(swept, built, tol).ok().map(|t| (t, 0.0)),
+            None => Some((swept, 0.0)),
+        };
     }
     let f = target.solid.face_iter().nth(face.face)?.clone();
     let wire = f.absolute_boundaries().first()?.clone();
@@ -357,6 +368,63 @@ fn build_cut_tool(target: &Body, face: WholeFace, depth: f64, built: Option<&Bod
         Some(built) => traced_onto(tool, built, tol).ok().map(|t| (t, off)),
         None => Some((tool, off)),
     }
+}
+
+/// `target` cut by `tool` where `tool` is a planar face of `target` swept back into it (as
+/// [`cut_tool`] makes it where every wall cuts) and lies in the material all along: the prism's
+/// other faces, turned inside out, take the face's place. The boolean of the two finds pieces of
+/// no area where the face's edges are the curves rounds meet it in (a tapered pocket's floor
+/// after its corners were filleted), and its retries kept the face over a sealed void. `None`
+/// when `tool` is no such prism or anything of `target` reaches into it.
+pub(crate) fn carve(target: &Body, tool: &Body) -> Option<Result<Body>> {
+    if target.is_mesh() || tool.is_mesh() || target.solid.boundaries().len() != 1 || tool.solid.boundaries().len() != 1 {
+        return None;
+    }
+    let tol = (target.size().max(tool.size()) * 1e-7).max(1e-9) * 10.0;
+    let key = |p: Vec3| ((p.x / tol).round() as i64, (p.y / tol).round() as i64, (p.z / tol).round() as i64);
+    let corners = |f: &mt::Face| {
+        let mut k: Vec<_> = f.edge_iter().map(|e| key(crate::body::from_p3(e.absolute_front().point()))).collect();
+        k.sort_unstable();
+        k
+    };
+    // The face the tool shares: in the plane of one of its faces, looking the same way, with the
+    // same corners.
+    let tool_faces: Vec<(&mt::Face, Vec3, Vec3)> = tool
+        .solid
+        .face_iter()
+        .filter_map(|f| Some((f, crate::blend::plane_normal(f)?, crate::body::from_p3(f.edge_iter().next()?.absolute_front().point()))))
+        .collect();
+    let (index, face, n, origin) = target.solid.face_iter().enumerate().find_map(|(i, f)| {
+        let n = crate::blend::plane_normal(f)?;
+        let p = crate::body::from_p3(f.edge_iter().next()?.absolute_front().point());
+        let mine = corners(f);
+        tool_faces.iter().any(|(g, m, q)| n.dot(*m) > 1.0 - 1e-9 && (*q - p).dot(n).abs() <= tol && corners(g) == mine).then_some((i, f, n, p))
+    })?;
+    // A prism: one face for each edge of it and the two caps, every corner on the face's plane or
+    // at the depth behind it.
+    let heights: Vec<f64> = tool.solid.vertex_iter().map(|v| (crate::body::from_p3(v.point()) - origin).dot(n)).collect();
+    let depth = -heights.iter().copied().fold(0.0, f64::min);
+    if !depth.is_finite()
+        || depth <= tol
+        || heights.iter().any(|h| h.abs() > tol && (h + depth).abs() > tol)
+        || tool.face_count() != face.edge_iter().count() + 2
+    {
+        return None;
+    }
+    // Nothing of the body may reach into the prism: the face's triangles swept back to the depth
+    // (reaching past the face's edges by the meshes' sag) lie wholly in the material. The space
+    // is asked from a few chords behind the face, where the faces standing on its edges (the
+    // rounds and walls round a pocket's floor) can't be taken for reaching in.
+    let chord = target.size() * 2e-4;
+    let clearance = crate::Clearance::new(target, chord)?;
+    let mesh = target.tessellate_with(chord, true).ok()?;
+    let f = u32::try_from(index).ok()?;
+    let triangles: Vec<([Vec3; 3], f64)> =
+        mesh.triangles.iter().zip(&mesh.tri_face).filter(|(_, g)| **g == f).filter_map(|(t, _)| mesh.tri(t)).map(|t| (t, 2.0 * chord)).collect();
+    if triangles.is_empty() || clearance.swept(&triangles, -n, 4.0 * chord, depth) != crate::Occupancy::Full {
+        return None;
+    }
+    crate::coplanar::carve(target, tool)
 }
 
 #[cfg(test)]

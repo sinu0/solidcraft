@@ -108,3 +108,50 @@ fn a_cut_into_a_slanted_face_beside_rounds_takes_what_lies_over_it() {
     let v = measure(&b).unwrap().volume - measure(&cut).unwrap().volume;
     assert!((v - taken).abs() < 0.05, "took {v}, expected {taken}");
 }
+
+/// A 40 x 30 x 20 block with a 20 x 10 pocket 8 deep from the top: its floor swept 5 mm back
+/// into the body is carved out along the floor, the pocket's walls running on down.
+fn pocketed_block() -> Body {
+    let block = box_solid(Vec3::ZERO, Vec3::new(40.0, 30.0, 20.0)).unwrap();
+    let pocket = box_solid(Vec3::new(10.0, 10.0, 12.0), Vec3::new(30.0, 20.0, 21.0)).unwrap();
+    boolean(&block, &pocket, BoolOp::Cut).unwrap().unwrap()
+}
+
+fn face_with_normal_at(b: &Body, n: Vec3, z: f64) -> usize {
+    b.solid
+        .face_iter()
+        .position(|f| {
+            crate::blend::plane_normal(f).is_some_and(|m| m.dot(n) > 1.0 - 1e-9)
+                && f.edge_iter().all(|e| (crate::body::from_p3(e.absolute_front().point()).z - z).abs() < 1e-9)
+        })
+        .unwrap()
+}
+
+#[test]
+fn a_floor_swept_back_into_the_body_is_carved_out_along_it() {
+    let b = pocketed_block();
+    let floor = b.solid.face_iter().nth(face_with_normal_at(&b, Vec3::Z, 12.0)).unwrap().clone();
+    let tool = Body::new(mt::builder::tsweep(&floor, crate::body::v3(Vec3::new(0.0, 0.0, -5.0)))).unwrap();
+    let cut = carve(&b, &tool).unwrap().unwrap();
+    assert!(cut.validity().is_empty(), "{:?}", cut.validity());
+    assert_eq!(cut.shell_count(), 1);
+    assert!((measure(&b).unwrap().volume - measure(&cut).unwrap().volume - 20.0 * 10.0 * 5.0).abs() < 1e-6);
+    // Only the floor 5 mm down is left facing up inside the pocket.
+    assert!(cut.solid.face_iter().all(|f| !crate::blend::plane_normal(f).is_some_and(|m| m.dot(Vec3::Z) > 1.0 - 1e-9)
+        || f.edge_iter().all(|e| [7.0, 20.0].iter().any(|z| (crate::body::from_p3(e.absolute_front().point()).z - z).abs() < 1e-9))));
+}
+
+/// The top swept back into the block shares the block's sides as well: no carving, the boolean
+/// takes it.
+#[test]
+fn a_face_whose_prism_meets_the_sides_is_not_carved() {
+    let block = box_solid(Vec3::ZERO, Vec3::new(40.0, 30.0, 20.0)).unwrap();
+    let top = block.solid.face_iter().nth(face_with_normal_at(&block, Vec3::Z, 20.0)).unwrap().clone();
+    let tool = Body::new(mt::builder::tsweep(&top, crate::body::v3(Vec3::new(0.0, 0.0, -5.0)))).unwrap();
+    assert!(carve(&block, &tool).is_none());
+    // A prism hanging below the floor beside the pocket's walls, out of the body: no carving.
+    let b = pocketed_block();
+    let floor = b.solid.face_iter().nth(face_with_normal_at(&b, Vec3::Z, 12.0)).unwrap().clone();
+    let deep = Body::new(mt::builder::tsweep(&floor, crate::body::v3(Vec3::new(0.0, 0.0, -15.0)))).unwrap();
+    assert!(carve(&b, &deep).is_none());
+}
